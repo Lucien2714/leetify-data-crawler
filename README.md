@@ -4,9 +4,9 @@ This project is used for UCSD COGS108 final project assignments.
 ## Run Guide:
 ### Setup
 1. Download Python and [UV(package managing)](https://docs.astral.sh/uv/)
-2. Open up terminal, go to the root folder of the project and run 
-   ```uv sync```
-3. Put your leetify API key inside the ```.env``` file.
+2. Open up terminal, go to the root folder of the project and run  ``` uv sync ```
+   
+3. Rename the ```.env.example``` file to ```.env``` and put your leetify API key inside the new ```.env``` file.
 ### Run
 ```python
 uv run main.py <rating_min> <rating_max> <seed_steam_id> [max_players](optional)
