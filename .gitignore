@@ -6,9 +6,10 @@ dist/
 wheels/
 *.egg-info
 
+# Secret API keys
+.env
 # Virtual environments
 .venv
-.env
 
 # Generated Data files.
 *.csv
