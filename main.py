@@ -375,8 +375,8 @@ if __name__ == "__main__":
     args=sys.argv[1:]
     print(f"Received arguments: {args}")
     if len(args) < 3:
-        print("Usage: python main.py <rating_min> <rating_max> <seed_steam_id>")
-        print(f"Example: python main.py {TARGET_RATING_MIN} {TARGET_RATING_MAX} {SEED_STEAM_ID}")
+        print("Usage: uv run main.py <rating_min> <rating_max> <seed_steam_id>")
+        print(f"Example: uv run main.py {TARGET_RATING_MIN} {TARGET_RATING_MAX} 123456789012345678")
         exit(1)
     if len(args) >= 4:
         maxPlayers = int(args[3])
