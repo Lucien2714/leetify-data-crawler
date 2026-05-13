@@ -1,6 +1,5 @@
 import requests
 import pandas as pd
-import time
 import threading
 from itertools import cycle
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -10,22 +9,31 @@ import sys
 
 
 API_KEYS = []
-# --- CONFIGURATION ---
 
+# --- CONFIGURATION ---
 SEED_STEAM_ID = ""
+
 TARGET_RATING_MIN = 7500
 TARGET_RATING_MAX = 15000
+
+# Target Rating System:
+# 0 = Premier rating
+# 1 = Faceit level
+TARGET_RATING_SYSTEM = 0
+
 MAX_PLAYERS = 1000
 
 MATCH_LIMIT_PER_PLAYER = 10
-MAX_WORKERS = 8          # Increase if you have more API keys / stable rate limit
+MAX_WORKERS = 8
 REQUEST_TIMEOUT = 15
 
 base_url = "https://api-public.cs-prod.leetify.com"
 
+
 # --- API KEY ROTATION ---
 key_lock = threading.Lock()
 key_cycle = None
+
 
 def get_headers():
     """Rotate API keys safely across threads."""
@@ -50,6 +58,7 @@ collected_data = []
 profile_cache = {}
 profile_cache_lock = threading.Lock()
 
+
 def init_crawler(seed_id=None, max_players=1000):
     global SEED_STEAM_ID
     global queue
@@ -66,7 +75,6 @@ def init_crawler(seed_id=None, max_players=1000):
     if not API_KEYS:
         raise ValueError("Missing LEETIFY_API_KEYS in .env")
 
-    # Rebuild key cycle after loading API keys
     key_cycle = cycle(API_KEYS)
 
     if seed_id is None:
@@ -88,6 +96,7 @@ def init_crawler(seed_id=None, max_players=1000):
 
     print(f"Initialized crawler with seed: {SEED_STEAM_ID} and max players: {MAX_PLAYERS}")
     print(f"Loaded {len(API_KEYS)} API keys for rotation.")
+
 
 def request_json(url):
     """Generic GET request helper."""
@@ -115,7 +124,11 @@ def get_player_matches(steam_id):
     data = request_json(url)
 
     if isinstance(data, list):
-        return [m["id"] for m in data if isinstance(m, dict) and "id" in m][:MATCH_LIMIT_PER_PLAYER]
+        return [
+            m["id"]
+            for m in data
+            if isinstance(m, dict) and "id" in m
+        ][:MATCH_LIMIT_PER_PLAYER]
 
     if isinstance(data, dict):
         return [
@@ -178,10 +191,13 @@ def get_player_profile(steam64_id):
     return data
 
 
-def get_player_premier_ranking(steam64_id):
-    """Return player Premier ranking."""
-    profile = get_player_profile(steam64_id)
+def get_target_rating_from_profile(profile):
+    """Return target rating based on TARGET_RATING_SYSTEM.
 
+    TARGET_RATING_SYSTEM:
+    0 = Premier rating
+    1 = Faceit level
+    """
     if not isinstance(profile, dict):
         return None
 
@@ -189,7 +205,34 @@ def get_player_premier_ranking(steam64_id):
     if not isinstance(ranks, dict):
         return None
 
-    return ranks.get("premier")
+    if TARGET_RATING_SYSTEM == 0:
+        return ranks.get("premier")
+
+    if TARGET_RATING_SYSTEM == 1:
+        return ranks.get("faceit")
+
+    raise ValueError(f"Invalid TARGET_RATING_SYSTEM: {TARGET_RATING_SYSTEM}")
+
+
+def get_target_rating_name():
+    """Return readable rating system name."""
+    if TARGET_RATING_SYSTEM == 0:
+        return "premier"
+
+    if TARGET_RATING_SYSTEM == 1:
+        return "faceit"
+
+    return "unknown"
+
+
+def meets_criteria(profile):
+    """Check if a player's selected rating system meets the target range."""
+    rating = get_target_rating_from_profile(profile)
+
+    if rating is None:
+        return False
+
+    return TARGET_RATING_MIN <= rating <= TARGET_RATING_MAX
 
 
 def build_player_row(player):
@@ -205,12 +248,15 @@ def build_player_row(player):
         return None
 
     ranks = profile.get("ranks", {})
-    rating = ranks.get("premier") if isinstance(ranks, dict) else None
+    if not isinstance(ranks, dict):
+        ranks = {}
 
-    if rating is None:
+    target_rating = get_target_rating_from_profile(profile)
+
+    if target_rating is None:
         return None
 
-    if not (TARGET_RATING_MIN <= rating <= TARGET_RATING_MAX):
+    if not meets_criteria(profile):
         return None
 
     rating_data = profile.get("rating", {})
@@ -226,7 +272,18 @@ def build_player_row(player):
         # Basic player info
         "steamId": steam_id,
         "name": player.get("name"),
-        "premier_rating": rating,
+
+        # Target rating info
+        "target_rating_system": get_target_rating_name(),
+        "target_rating": target_rating,
+
+        # All ranking systems available from profile
+        "premier_rating": ranks.get("premier"),
+        "faceit_level": ranks.get("faceit"),
+        "faceit_elo": ranks.get("faceit_elo"),
+        "leetify_rank": ranks.get("leetify"),
+        "wingman_rank": ranks.get("wingman"),
+        "renown_rank": ranks.get("renown"),
 
         # Match-level stats from /v2/matches/{match_id}
         "match_kills": player.get("kills"),
@@ -269,16 +326,22 @@ def build_player_row(player):
         "utility_on_death_avg": stats_data.get("utility_on_death_avg"),
     }
 
-def start_crawler(low_bound, high_bound, seed):
+
+def start_crawler(low_bound, high_bound, seed, rating_system):
     global TARGET_RATING_MIN
     global TARGET_RATING_MAX
+    global TARGET_RATING_SYSTEM
 
     TARGET_RATING_MIN = low_bound
     TARGET_RATING_MAX = high_bound
+    TARGET_RATING_SYSTEM = rating_system
 
+    system_name = get_target_rating_name()
+
+    print(f"Target rating system: {system_name}")
     print(f"Target rating range: {TARGET_RATING_MIN} - {TARGET_RATING_MAX}")
     print(f"Starting crawl from seed: {seed}...")
-    
+
     while queue and len(collected_data) < MAX_PLAYERS:
         current_sid = queue.pop(0)
 
@@ -310,6 +373,7 @@ def start_crawler(low_bound, high_bound, seed):
 
         # 3. Deduplicate players from these matches
         candidate_players = {}
+
         for p in all_players_from_matches:
             sid = p.get("steamId")
 
@@ -356,7 +420,7 @@ def start_crawler(low_bound, high_bound, seed):
 
                 print(
                     f"Collected {len(collected_data)}/{MAX_PLAYERS}: "
-                    f"{sid} | Rating: {row['premier_rating']}"
+                    f"{sid} | {row['target_rating_system']}: {row['target_rating']}"
                 )
 
                 if sid not in players_in_queue:
@@ -365,26 +429,48 @@ def start_crawler(low_bound, high_bound, seed):
 
     # --- SAVE DATA ---
     df = pd.DataFrame(collected_data)
-    df.to_csv(f"cs2_{str(low_bound)}_to_{str(high_bound)}_size_{MAX_PLAYERS}_dataset.csv", index=False)
+
+    output_file = (
+        f"cs2_{system_name}_{low_bound}_to_{high_bound}"
+        f"_size_{MAX_PLAYERS}_dataset.csv"
+    )
+
+    df.to_csv(output_file, index=False)
 
     print(f"\nSuccessfully collected {len(df)} players.")
-    print(f"Saved to cs2_{str(low_bound)}_to_{str(high_bound)}_size_{MAX_PLAYERS}_dataset.csv")
+    print(f"Saved to {output_file}")
+
 
 if __name__ == "__main__":
-    maxPlayers=1000
-    args=sys.argv[1:]
-    print(f"Received arguments: {args}")
-    if len(args) < 3:
-        print("Usage: uv run main.py <rating_min> <rating_max> <seed_steam_id>")
-        print(f"Example: uv run main.py {TARGET_RATING_MIN} {TARGET_RATING_MAX} 123456789012345678")
-        exit(1)
-    if len(args) >= 4:
-        maxPlayers = int(args[3])
+    maxPlayers = 1000
+    args = sys.argv[1:]
 
-    minRating = int(args[0])
-    maxRating = int(args[1])
-    seedID = args[2]
-    print(f"Starting crawler with rating range {minRating}-{maxRating}, seed ID: {seedID}, max players: {maxPlayers}")
+    print(f"Received arguments: {args}")
+
+    if len(args) < 4:
+        print("Usage: uv run main.py <rating_system> <rating_min> <rating_max> <seed_steam_id> [max_players]")
+        print("rating_system: 0 = Premier rating, 1 = Faceit level")
+        print("Example Premier: uv run main.py 0 7500 15000 76561199039719492 1000")
+        print("Example Faceit: uv run main.py 1 8 10 76561199039719492 1000")
+        exit(1)
+
+    ratingSystem = int(args[0])
+    minRating = int(args[1])
+    maxRating = int(args[2])
+    seedID = args[3]
+
+    if len(args) >= 5:
+        maxPlayers = int(args[4])
+
+    if ratingSystem not in (0, 1):
+        raise ValueError("rating_system must be 0 for Premier or 1 for Faceit")
+
+    systemName = "Premier" if ratingSystem == 0 else "Faceit"
+
+    print(
+        f"Starting crawler with {systemName} range {minRating}-{maxRating}, "
+        f"seed ID: {seedID}, max players: {maxPlayers}"
+    )
+
     init_crawler(seed_id=seedID, max_players=maxPlayers)
-    start_crawler(minRating, maxRating, seedID)
-    
+    start_crawler(minRating, maxRating, seedID, ratingSystem)
