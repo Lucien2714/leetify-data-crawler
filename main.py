@@ -26,6 +26,7 @@ MAX_PLAYERS = 1000
 MATCH_LIMIT_PER_PLAYER = 10
 MAX_WORKERS = 8
 REQUEST_TIMEOUT = 15
+CHECKPOINT_INTERVAL = 50
 
 base_url = "https://api-public.cs-prod.leetify.com"
 
@@ -154,19 +155,6 @@ def get_match_players(match_id):
         {
             "steamId": p.get("steam64_id"),
             "name": p.get("name"),
-            "team": p.get("initial_team_number"),
-            "kills": p.get("total_kills"),
-            "deaths": p.get("total_deaths"),
-            "kd_ratio": p.get("kd_ratio"),
-            "leetify_rating": p.get("leetify_rating"),
-            "damage": p.get("total_damage"),
-            "rounds_count": p.get("rounds_count"),
-            "accuracy_enemy_spotted": p.get("accuracy_enemy_spotted"),
-            "accuracy_head": p.get("accuracy_head"),
-            "spray_accuracy": p.get("spray_accuracy"),
-            "counter_strafing_good_ratio": p.get("counter_strafing_shots_good_ratio"),
-            "trade_kills_success_percentage": p.get("trade_kills_success_percentage"),
-            "traded_deaths_success_percentage": p.get("traded_deaths_success_percentage"),
         }
         for p in stats
         if isinstance(p, dict) and p.get("steam64_id")
@@ -236,7 +224,7 @@ def meets_criteria(profile):
 
 
 def build_player_row(player):
-    """Build one output row from match stats + full profile rating/stats."""
+    """Build one player-level output row from full profile rating/stats."""
     steam_id = player.get("steamId")
 
     if not steam_id:
@@ -268,10 +256,22 @@ def build_player_row(player):
     if not isinstance(stats_data, dict):
         stats_data = {}
 
+    bans = profile.get("bans", [])
+    if not isinstance(bans, list):
+        bans = []
+
     return {
         # Basic player info
         "steamId": steam_id,
         "name": player.get("name"),
+
+        # Profile metadata from /v3/profile
+        "privacy_mode": profile.get("privacy_mode"),
+        "winrate": profile.get("winrate"),
+        "total_matches": profile.get("total_matches"),
+        "first_match_date": profile.get("first_match_date"),
+        "is_banned": len(bans) > 0,
+        "ban_count": len(bans),
 
         # Target rating info
         "target_rating_system": get_target_rating_name(),
@@ -285,13 +285,6 @@ def build_player_row(player):
         "wingman_rank": ranks.get("wingman"),
         "renown_rank": ranks.get("renown"),
 
-        # Match-level stats from /v2/matches/{match_id}
-        "match_kills": player.get("kills"),
-        "match_deaths": player.get("deaths"),
-        "match_kd_ratio": player.get("kd_ratio"),
-        "match_leetify_rating": player.get("leetify_rating"),
-        "match_damage": player.get("damage"),
-        "match_rounds_count": player.get("rounds_count"),
 
         # Profile rating fields
         "aim": rating_data.get("aim"),
@@ -327,6 +320,22 @@ def build_player_row(player):
     }
 
 
+def make_output_filename(system_name, low_bound, high_bound, max_players, checkpoint=False):
+    """Create a consistent output filename for final and checkpoint CSV files."""
+    suffix = "checkpoint" if checkpoint else "dataset"
+    return (
+        f"cs2_{system_name}_{low_bound}_to_{high_bound}"
+        f"_size_{max_players}_{suffix}.csv"
+    )
+
+
+def save_collected_data(output_file):
+    """Save currently collected player rows to CSV."""
+    df = pd.DataFrame(collected_data)
+    df.to_csv(output_file, index=False)
+    return len(df)
+
+
 def start_crawler(low_bound, high_bound, seed, rating_system):
     global TARGET_RATING_MIN
     global TARGET_RATING_MAX
@@ -337,6 +346,13 @@ def start_crawler(low_bound, high_bound, seed, rating_system):
     TARGET_RATING_SYSTEM = rating_system
 
     system_name = get_target_rating_name()
+    checkpoint_file = make_output_filename(
+        system_name,
+        low_bound,
+        high_bound,
+        MAX_PLAYERS,
+        checkpoint=True,
+    )
 
     print(f"Target rating system: {system_name}")
     print(f"Target rating range: {TARGET_RATING_MIN} - {TARGET_RATING_MAX}")
@@ -423,21 +439,25 @@ def start_crawler(low_bound, high_bound, seed, rating_system):
                     f"{sid} | {row['target_rating_system']}: {row['target_rating']}"
                 )
 
+                if len(collected_data) % CHECKPOINT_INTERVAL == 0:
+                    rows_saved = save_collected_data(checkpoint_file)
+                    print(f"Checkpoint saved: {checkpoint_file} ({rows_saved} rows)")
+
                 if sid not in players_in_queue:
                     players_in_queue.add(sid)
                     queue.append(sid)
 
-    # --- SAVE DATA ---
-    df = pd.DataFrame(collected_data)
-
-    output_file = (
-        f"cs2_{system_name}_{low_bound}_to_{high_bound}"
-        f"_size_{MAX_PLAYERS}_dataset.csv"
+    # --- SAVE FINAL DATA ---
+    output_file = make_output_filename(
+        system_name,
+        low_bound,
+        high_bound,
+        MAX_PLAYERS,
+        checkpoint=False,
     )
+    rows_saved = save_collected_data(output_file)
 
-    df.to_csv(output_file, index=False)
-
-    print(f"\nSuccessfully collected {len(df)} players.")
+    print(f"\nSuccessfully collected {rows_saved} players.")
     print(f"Saved to {output_file}")
 
 
